@@ -31,13 +31,21 @@ async function connect(): Promise<Db> {
     // 60 requests once spun up enough instances x 5 connections to exhaust
     // the pooler's client limit, and frozen instances hold theirs open.
     const sql = postgres(url, { prepare: false, max: 1, idle_timeout: 20, connect_timeout: 10 });
-    // Serverless cold starts run this concurrently, and parallel
-    // "create ... if not exists" can collide in the catalog. A transaction
-    // advisory lock makes instances take turns; it releases on commit.
-    await sql.begin(async (tx) => {
-      await tx.unsafe("select pg_advisory_xact_lock(727274)");
-      await tx.unsafe(SCHEMA_SQL);
-    });
+    // Normal cold start: the schema exists, so touch nothing and take no lock.
+    // First deploy only: parallel "create ... if not exists" can collide in the
+    // catalog, so instances take turns on an advisory lock. The timeouts make
+    // sure a frozen serverless instance can't hold that lock forever.
+    const [{ ready }] = await sql.unsafe<{ ready: boolean }[]>(
+      "select to_regclass('public.player_ratings') is not null as ready",
+    );
+    if (!ready) {
+      await sql.begin(async (tx) => {
+        await tx.unsafe("set local lock_timeout = '10s'");
+        await tx.unsafe("set local idle_in_transaction_session_timeout = '15s'");
+        await tx.unsafe("select pg_advisory_xact_lock(727274)");
+        await tx.unsafe(SCHEMA_SQL);
+      });
+    }
     return {
       ...pgQuery(sql),
       transaction: (fn) => sql.begin((tx) => fn({ ...pgQuery(tx), transaction: () => nested() })) as Promise<never>,

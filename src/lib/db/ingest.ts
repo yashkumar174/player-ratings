@@ -65,6 +65,9 @@ export async function ingestCsv(text: string, filename: string): Promise<IngestR
 
   const db = await getDb();
   return db.transaction(async (tx) => {
+    // A serverless instance frozen mid-upload must not leave locks behind.
+    await tx.query("set local statement_timeout = '30s'");
+    await tx.query("set local idle_in_transaction_session_timeout = '15s'");
     const [{ id: uploadId }] = await tx.query<{ id: number }>(
       `insert into uploads (filename, file_sha256, total_rows, accepted_rows, skipped_rows, issues)
        values ($1, $2, $3, $4, $5, $6::text::jsonb) returning id`,
