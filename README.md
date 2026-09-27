@@ -139,18 +139,31 @@ This is the part I'd most want to talk through.
 
 ## Approach note
 
-_Draft. Yash: rewrite this in your own words before sending._
+**Data first.** The brief said the file was "as-is", so before building anything I profiled it: duplicates, name and team spelling variants, two date formats, blanks, and numbers that can't be true (more goals than shots on target). Every one of those became a rule in the cleaner and a line in the upload report, and several became unit tests.
 
-I started with the data, not the app. I profiled the CSV in pandas before writing any code (duplicates, name variants, mixed dates, blanks, impossible combinations), because the brief said "as-is" and that usually means the cleaning is half the job. That profile became the cleaner's test cases.
+**Rating.** I wanted something I could defend line by line, not a clever formula. Per-90 and comparing players within their position were the easy calls. The hard part was small samples: most players have 1–3 matches. So I wrote a script that runs every candidate formula on the file and compares them, and it changed my mind a few times:
+- The simple points system put five 18–25 minute substitutes at the top. Discarded.
+- The formula that looked most *consistent* (ignoring position) was only consistent because it ranks roles: centre-mids first, strikers last. So I stopped using consistency to pick a winner and used it to *measure* how noisy the data is instead. That measurement set how hard low-minute players get pulled toward average.
+- My first version still had a 58-minute winger at the 99th percentile. I added per-stat shrinkage (goals are noisier than passes, so they're pulled harder). He dropped to 93rd. The script showed most of that gain came from the stronger overall pull, not the per-stat part. I kept both and said so.
+- A more "textbook" version made the results worse, so I reverted it.
 
-For the rating, I wanted something I could defend line by line rather than a clever formula. Per-90 and position peers were obvious; the real question was small samples. I built candidates and a script to compare them, and that script changed my mind several times. First, it showed the box score's top five were all 18–25 minute cameos. Second, the metric I expected to pick the winner (split-half stability) favoured the position-blind model. That turned out to be because it measures role, not quality. So I used split-half agreement to *set* the shrinkage constant, not to choose the model.
+**What I'd flag first:** team goal difference predicts a squad's average rating almost perfectly (ρ = 0.96). I measured it but couldn't fix it in the time. The honest reading is that the rating may be partly rating the team.
 
-v1 still had a 58-minute winger at the 99th percentile, so I added per-stat empirical-Bayes priors (goals shrink harder than passes). The script then showed most of the gain came from the stronger whole-score shrink the new split-half implied, not the priors themselves. I kept both and wrote that down. A theoretically cleaner variant (scaling by estimated talent spread) made things worse, and I reverted it.
+**Where I got stuck.**
+- *Player identity with no player ID.* I settled on name + age group + club and documented what that gets wrong.
+- *Whether to trust the dd/mm dates.* I checked them against the weekly fixture pattern.
+- *Production.* Most of my time went here. The app worked locally but broke three times on Vercel + Supabase:
+  1. The Postgres driver double-encoded JSON, so player pages crashed.
+  2. My own load test used up every database connection.
+  3. After I cut to one connection per server, queries sent back-to-back through Supabase's pooler hung forever. The first fix for that hit a bug in the driver itself.
 
-A bug that only production caught: locally the app runs on PGlite; on Vercel it runs on postgres.js against Supabase. The first deploy's player pages returned 500, and the upload history showed "3671 notes" where there were 29. postgres.js JSON-encodes any parameter the server says is `jsonb`, so my already-stringified JSON was stored as one long JSON *string*; PGlite doesn't do that. The fix was to send it as text and cast in SQL (`$1::text::jsonb`), plus a one-line repair for rows already written. The lesson is that "same SQL on both drivers" isn't the same as "same behaviour". Next time I'd run the test suite against a real Postgres in CI, not just the embedded one.
+  Each one was found from logs and `pg_stat_activity`, and they're written up in the commit history. The lesson: test against the real database, not only a local stand-in.
 
-Then I load-tested it and took it down myself. Firing 60 page requests at once spun up dozens of serverless instances, each with a pool of 5 connections, and exhausted the Supabase pooler. I cut the pool to one connection per instance, which introduced a subtler bug. postgres.js pipelines a page's parallel queries down that one connection, and through Supabase's transaction pooler the database sat waiting on the client (`pg_stat_activity`: *active / ClientRead*) until Vercel's 300-second timeout. Every database page hung. I found it by querying `pg_stat_activity`. My first fix, postgres.js' `max_pipeline: 0`, turned out to break its transactions (a library bug: every upload crashed), so the app now queues its own statements, one in flight per instance. I also stopped running schema setup on every cold start, and every transaction now has lock and idle timeouts. The lesson here: serverless + a connection pooler needs one connection per instance, one query at a time on it, and nothing that can hold a lock across a frozen instance.
+**AI tools.** I built this with Claude Code (Anthropic's Claude), and it did most of the work: the code, the SQL, the tests, and a lot of the statistical reasoning. My part was steering it and checking it:
+- deciding what to build and in what order
+- choosing which weakness to fix before submitting
+- reading the comparison numbers and pushing back when a result looked wrong
+- setting up and deploying Supabase and Vercel
+- running the database queries and pulling the logs that found the production bugs
 
-Where I got stuck: player identity with no ID (settled on name + age group + club and documented the failure mode), and whether to trust the dd/mm dates (checked them against the weekly fixture pattern). The team-strength correlation came late and I didn't have time to fix it, only to measure and report it.
-
-AI tools: I built this with Claude Code. It did most of the typing: scaffold, SQL, components, tests. I used it as a pair for the data profiling and for arguing through the rating design. My judgement went into what to check in the data, which model to keep and why, and what to admit is wrong. Every number in this README comes from running `npm run evaluate` on the file, not from the model's claims.
+Every number in this README comes from running `npm run evaluate` on the file, not from the model's say-so. I can walk through any of it on the call.
