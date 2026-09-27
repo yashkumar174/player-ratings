@@ -125,7 +125,9 @@ export default async function PlayersPage(props: PageProps<"/">) {
                   <div className="min-w-0">
                     <div className="truncate text-sm font-medium">{p.name}</div>
                     <div className="truncate text-xs text-muted">
-                      {p.position ?? "–"} · {p.team} · {p.ageGroup} · {p.minutes ?? 0} min
+                      {p.position ?? "–"} · {p.ageGroup} · {p.minutes ?? 0} min
+                      {p.reliability !== null && p.reliability < 0.25 && <span className="text-mid"> · low sample</span>} ·{" "}
+                      {p.team}
                     </div>
                   </div>
                   <PercentileBar value={p.percentile} reliability={p.reliability} />

@@ -26,7 +26,7 @@ export function PercentileBar({ value, reliability }: { value: number | null; re
         />
       </div>
       {reliability !== undefined && reliability !== null && reliability < 0.25 && (
-        <span title="Under ~90 minutes: rating is mostly the age-group average" className="text-[10px] uppercase tracking-wide text-faint">
+        <span title="Under ~90 minutes: rating is mostly the age-group average" className="hidden text-[10px] uppercase tracking-wide text-faint md:inline">
           low sample
         </span>
       )}

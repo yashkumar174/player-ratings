@@ -128,8 +128,11 @@ export default function MethodPage() {
             defence is good.
           </li>
           <li>
-            <span className="text-text">No opponent strength.</span> Real Madrid U15 beat Getafe 9–0. Everyone on the
-            pitch that day gets a flattering or brutal per-90.
+            <span className="text-text">It may be rating teams, not players.</span> Rank the 12 squads by average
+            player percentile and by goal difference: the two orders agree at ρ = 0.97. Real Madrid U15 (+12 GD) averages
+            the 77th percentile; Getafe U15 (−10) the 30th. Either the better clubs have the better players, or a good
+            team inflates everyone&apos;s per-90s. This file can&apos;t tell those apart, and there is no opponent
+            adjustment: Real Madrid beat Getafe 9–0 and every per-90 from that match counts the same as any other.
           </li>
           <li>
             <span className="text-text">Volume, not quality.</span> Crosses and progressive passes are counts with no
