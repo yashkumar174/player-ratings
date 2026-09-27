@@ -17,6 +17,11 @@ export interface IngestReport {
   issues: Issue[];
 }
 
+// JSON goes in as text and is cast by Postgres ("$1::text::jsonb"). A bare
+// "::jsonb" cast makes postgres.js JSON-encode the already-stringified value
+// a second time, storing a JSON *string*; PGlite doesn't, so it only showed
+// up in production.
+
 /** Multi-row INSERT with positional params, chunked under Postgres' 65k param limit. */
 async function insertMany<T>(
   db: Db,
@@ -62,7 +67,7 @@ export async function ingestCsv(text: string, filename: string): Promise<IngestR
   return db.transaction(async (tx) => {
     const [{ id: uploadId }] = await tx.query<{ id: number }>(
       `insert into uploads (filename, file_sha256, total_rows, accepted_rows, skipped_rows, issues)
-       values ($1, $2, $3, $4, $5, $6::jsonb) returning id`,
+       values ($1, $2, $3, $4, $5, $6::text::jsonb) returning id`,
       [
         filename,
         createHash("sha256").update(text).digest("hex"),
@@ -126,7 +131,7 @@ export async function ingestCsv(text: string, filename: string): Promise<IngestR
         .map((c) => `${c} = excluded.${c}`)
         .join(", ")}
        returning (xmax = 0) as inserted`,
-      { flags: "::jsonb" },
+      { flags: "::text::jsonb" },
     );
     const inserted = written.filter((w) => w.inserted).length;
 
@@ -181,7 +186,7 @@ export async function recomputeRatings(db: Db): Promise<number> {
       r.reliability, r.score, r.percentile, JSON.stringify(r.components), JSON.stringify(r.matchScores), MODEL_VERSION,
     ]),
     "",
-    { components: "::jsonb", match_scores: "::jsonb" },
+    { components: "::text::jsonb", match_scores: "::text::jsonb" },
   );
   return ratings.length;
 }

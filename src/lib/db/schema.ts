@@ -82,4 +82,11 @@ create table if not exists player_ratings (
   computed_at timestamptz not null default now()
 );
 create index if not exists player_ratings_rank_idx on player_ratings (age_group, percentile desc);
+
+-- Repair for rows written before the double-encoding fix (see ingest.ts):
+-- a JSON value stored as a JSON string is unwrapped. No-op once clean.
+update uploads set issues = (issues #>> '{}')::jsonb where jsonb_typeof(issues) = 'string';
+update appearances set flags = (flags #>> '{}')::jsonb where jsonb_typeof(flags) = 'string';
+update player_ratings set components = (components #>> '{}')::jsonb, match_scores = (match_scores #>> '{}')::jsonb
+  where jsonb_typeof(components) = 'string' or jsonb_typeof(match_scores) = 'string';
 `;
