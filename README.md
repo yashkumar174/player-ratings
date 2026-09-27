@@ -2,7 +2,8 @@
 
 Upload a youth-football match events CSV, get every player rated as a percentile against his age group.
 
-- **Live:** _add Vercel URL_
+- **Live:** https://player-ratings-kappa.vercel.app
+- **Repo:** https://github.com/yashkumar174/player-ratings
 - **Stack:** Next.js 16 (App Router, server components, server actions) · Postgres (Supabase) · TypeScript · Tailwind
 - **Pages:** `/` players (search, filter by age/position, sort) · `/players/[id]` rating breakdown, matches, raw numbers · `/upload` CSV upload with a cleaning report · `/method` the reasoning and its limits
 
@@ -145,6 +146,8 @@ I started with the data, not the app. I profiled the CSV in pandas before writin
 For the rating, I wanted something I could defend line by line rather than a clever formula. Per-90 and position peers were obvious; the real question was small samples. I built candidates and a script to compare them, and that script changed my mind several times. First, it showed the box score's top five were all 18–25 minute cameos. Second, the metric I expected to pick the winner (split-half stability) favoured the position-blind model. That turned out to be because it measures role, not quality. So I used split-half agreement to *set* the shrinkage constant, not to choose the model.
 
 v1 still had a 58-minute winger at the 99th percentile, so I added per-stat empirical-Bayes priors (goals shrink harder than passes). The script then showed most of the gain came from the stronger whole-score shrink the new split-half implied, not the priors themselves. I kept both and wrote that down. A theoretically cleaner variant (scaling by estimated talent spread) made things worse, and I reverted it.
+
+A bug that only production caught: locally the app runs on PGlite; on Vercel it runs on postgres.js against Supabase. The first deploy's player pages returned 500, and the upload history showed "3671 notes" where there were 29. postgres.js JSON-encodes any parameter the server says is `jsonb`, so my already-stringified JSON was stored as one long JSON *string*; PGlite doesn't do that. The fix was to send it as text and cast in SQL (`$1::text::jsonb`), plus a one-line repair for rows already written. The lesson is that "same SQL on both drivers" isn't the same as "same behaviour". Next time I'd run the test suite against a real Postgres in CI, not just the embedded one.
 
 Where I got stuck: player identity with no ID (settled on name + age group + club and documented the failure mode), and whether to trust the dd/mm dates (checked them against the weekly fixture pattern). The team-strength correlation came late and I didn't have time to fix it, only to measure and report it.
 

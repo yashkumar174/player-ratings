@@ -28,7 +28,13 @@ async function connect(): Promise<Db> {
   if (url) {
     // prepare:false keeps us compatible with Supabase's transaction pooler.
     const sql = postgres(url, { prepare: false, max: 5, idle_timeout: 20 });
-    await sql.unsafe(SCHEMA_SQL);
+    // Serverless cold starts run this concurrently, and parallel
+    // "create ... if not exists" can collide in the catalog. A transaction
+    // advisory lock makes instances take turns; it releases on commit.
+    await sql.begin(async (tx) => {
+      await tx.unsafe("select pg_advisory_xact_lock(727274)");
+      await tx.unsafe(SCHEMA_SQL);
+    });
     return {
       ...pgQuery(sql),
       transaction: (fn) => sql.begin((tx) => fn({ ...pgQuery(tx), transaction: () => nested() })) as Promise<never>,
