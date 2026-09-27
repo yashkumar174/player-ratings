@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Suspense } from "react";
 import { POSITIONS, POSITION_LABEL } from "@/lib/columns";
 import { getOverview, listPlayers, SORTS, type SortKey } from "@/lib/db/queries";
+import { LOW_SAMPLE_MINUTES } from "@/lib/rating/compute";
 import { AutoSubmitSelect } from "@/components/auto-submit-select";
 import { PercentileBar } from "@/components/percentile";
 import { SearchBox } from "@/components/search-box";
@@ -126,11 +127,11 @@ export default async function PlayersPage(props: PageProps<"/">) {
                     <div className="truncate text-sm font-medium">{p.name}</div>
                     <div className="truncate text-xs text-muted">
                       {p.position ?? "–"} · {p.ageGroup} · {p.minutes ?? 0} min
-                      {p.reliability !== null && p.reliability < 0.25 && <span className="text-mid"> · low sample</span>} ·{" "}
+                      {p.minutes !== null && p.minutes < LOW_SAMPLE_MINUTES && <span className="text-mid"> · low sample</span>} ·{" "}
                       {p.team}
                     </div>
                   </div>
-                  <PercentileBar value={p.percentile} reliability={p.reliability} />
+                  <PercentileBar value={p.percentile} minutes={p.minutes} />
                 </Link>
               </li>
             ))}
@@ -172,7 +173,7 @@ export default async function PlayersPage(props: PageProps<"/">) {
                       {p.minutes ?? 0} <span className="text-faint">/ {p.apps ?? 0}</span>
                     </td>
                     <td className="px-4 py-2.5">
-                      <PercentileBar value={p.percentile} reliability={p.reliability} />
+                      <PercentileBar value={p.percentile} minutes={p.minutes} />
                     </td>
                   </tr>
                 ))}

@@ -3,7 +3,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { POSITION_LABEL, STAT_COLUMNS, STAT_LABEL } from "@/lib/columns";
 import { getPlayer } from "@/lib/db/queries";
-import { MIN_MATCH_MINUTES, SHRINK_MINUTES } from "@/lib/rating/compute";
+import type { Component } from "@/lib/rating/compute";
+import { LOW_SAMPLE_MINUTES, MIN_MATCH_MINUTES, SHRINK_MINUTES } from "@/lib/rating/compute";
 import { ordinal, pctTone } from "@/components/percentile";
 
 const FLAG_LABEL: Record<string, string> = {
@@ -35,6 +36,13 @@ async function load(props: PageProps<"/players/[id]">) {
 export async function generateMetadata(props: PageProps<"/players/[id]">): Promise<Metadata> {
   const p = await load(props);
   return { title: p.name };
+}
+
+function showFeature(c: Component): string {
+  const pct = c.feature.endsWith("_pct") || c.feature === "loss_rate";
+  const f = (v: number) => (pct ? `${(v * 100).toFixed(0)}%` : v.toFixed(2));
+  const shrunk = f(c.raw) === f(c.value) ? f(c.value) : `${f(c.raw)} → ${f(c.value)}`;
+  return `${shrunk} vs ${f(c.peerMean)}`;
 }
 
 function fmt(v: number, digits = 2) {
@@ -84,8 +92,9 @@ export default async function PlayerPage(props: PageProps<"/players/[id]">) {
           <div className="mt-3 rounded-xl border border-line bg-surface p-4 sm:p-5">
             <p className="text-sm leading-relaxed text-muted">
               Compared with {r.peerCount} {r.position}s{" "}
-              {r.peerGroup.startsWith("ALL|") ? "across both age groups (too few in one)" : `in ${p.ageGroup}`}. Each bar
-              is how far above or below that group he is on one measure, times the weight the role gives it. They add up
+              {r.peerGroup.startsWith("ALL|") ? "across both age groups (too few in one)" : `in ${p.ageGroup}`}. Each
+              measure is first pulled toward the group average, harder for rare, noisy stats like goals. Each bar is how
+              far above or below the group he then is, times the weight the role gives it. They add up
               to a raw score of <span className="text-text tabular">{fmt(r.rawScore)}</span>. With {r.minutes} minutes the
               rating keeps <span className="text-text tabular">{Math.round(r.reliability * 100)}%</span> of that and
               pulls the rest toward average (half-trust point: {SHRINK_MINUTES} min), giving{" "}
@@ -98,9 +107,9 @@ export default async function PlayerPage(props: PageProps<"/players/[id]">) {
                 conceded and distribution.
               </p>
             )}
-            {r.reliability < 0.25 && (
+            {r.minutes < LOW_SAMPLE_MINUTES && (
               <p className="mt-3 rounded-lg border border-line px-3 py-2 text-xs text-mid">
-                Under {Math.round(SHRINK_MINUTES / 3)} minutes played. Treat this rating as close to &ldquo;unknown&rdquo;.
+                Under {LOW_SAMPLE_MINUTES} minutes played. Treat this rating as close to &ldquo;unknown&rdquo;.
               </p>
             )}
             <ul className="mt-5 space-y-2.5">
@@ -112,9 +121,7 @@ export default async function PlayerPage(props: PageProps<"/players/[id]">) {
                     <div className="min-w-0">
                       <div className="truncate">{c.label}</div>
                       <div className="text-xs text-faint tabular">
-                        {c.feature.endsWith("_pct") || c.feature === "loss_rate"
-                          ? `${(c.value * 100).toFixed(0)}% vs ${(c.peerMean * 100).toFixed(0)}%`
-                          : `${c.value.toFixed(2)} vs ${c.peerMean.toFixed(2)}`}
+                        {showFeature(c)}
                         {c.weight < 0 && " · lower is better"}
                       </div>
                     </div>
@@ -135,8 +142,8 @@ export default async function PlayerPage(props: PageProps<"/players/[id]">) {
               })}
             </ul>
             <p className="mt-4 text-xs text-faint">
-              Left of the line pulls the rating down, right pushes it up. Figures are his per-90 (or rate) vs the
-              minutes-weighted group average.
+              Left of the line pulls the rating down, right pushes it up. Figures: his raw number → his estimate
+              after shrinking, vs the minutes-weighted group average.
             </p>
           </div>
         </section>

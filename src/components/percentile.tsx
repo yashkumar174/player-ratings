@@ -1,3 +1,5 @@
+import { LOW_SAMPLE_MINUTES } from "@/lib/rating/compute";
+
 // Percentile display shared by the list and the detail page.
 
 export function pctTone(p: number): string {
@@ -12,7 +14,7 @@ export function ordinal(n: number): string {
   return `${r}${s}`;
 }
 
-export function PercentileBar({ value, reliability }: { value: number | null; reliability?: number | null }) {
+export function PercentileBar({ value, minutes }: { value: number | null; minutes?: number | null }) {
   if (value === null) return <span className="text-xs text-faint">unrated</span>;
   return (
     <div className="flex items-center gap-2.5">
@@ -25,8 +27,8 @@ export function PercentileBar({ value, reliability }: { value: number | null; re
           style={{ width: `${Math.max(2, value)}%`, background: pctTone(value) }}
         />
       </div>
-      {reliability !== undefined && reliability !== null && reliability < 0.25 && (
-        <span title="Under ~90 minutes: rating is mostly the age-group average" className="hidden text-[10px] uppercase tracking-wide text-faint md:inline">
+      {minutes !== undefined && minutes !== null && minutes < LOW_SAMPLE_MINUTES && (
+        <span title={`Under ${LOW_SAMPLE_MINUTES} minutes: treat as close to unknown`} className="hidden text-[10px] uppercase tracking-wide text-faint md:inline">
           low sample
         </span>
       )}

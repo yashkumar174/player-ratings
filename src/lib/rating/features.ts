@@ -177,21 +177,40 @@ export function aggregate(apps: AppearanceInput[]): Totals {
   return t;
 }
 
-/** Raw (un-smoothed) feature value, or null when there is nothing to measure. */
-export function rawFeature(t: Totals, key: FeatureKey): number | null {
+/**
+ * A feature as (count, exposure): per-90 features are (events, minutes),
+ * rates are (successes, attempts). Null when the player has no exposure.
+ */
+export function evidence(t: Totals, key: FeatureKey): [number, number] | null {
   const def = FEATURES[key];
   if (def.kind === "per90") {
     const m = t.per90Mins[def.stat];
-    return m ? ((t.per90Sum[def.stat] ?? 0) / m) * 90 : null;
+    return m ? [t.per90Sum[def.stat] ?? 0, m] : null;
   }
   const p = t.rate[key];
-  return p && p[1] > 0 ? p[0] / p[1] : null;
+  return p && p[1] > 0 ? p : null;
 }
 
-/** Feature value with rate features pulled toward the peer rate. */
-export function smoothedFeature(t: Totals, key: FeatureKey, peerRate: number): number | null {
-  const def = FEATURES[key];
-  if (def.kind === "per90") return rawFeature(t, key);
-  const [s, n] = t.rate[key] ?? [0, 0];
-  return (s + def.prior * peerRate) / (n + def.prior);
+const scale = (key: FeatureKey) => (FEATURES[key].kind === "per90" ? 90 : 1);
+
+/** Raw (un-smoothed) feature value, or null when there is nothing to measure. */
+export function rawFeature(t: Totals, key: FeatureKey): number | null {
+  const e = evidence(t, key);
+  return e ? (e[0] / e[1]) * scale(key) : null;
+}
+
+/**
+ * Prior belief about a feature before seeing the player: the peer average
+ * (per minute or per attempt) and how much exposure it is worth.
+ */
+export interface Prior {
+  mean: number;
+  strength: number;
+}
+
+/** Feature value pulled toward the peer mean: (count + k·mean) / (exposure + k). */
+export function smoothedFeature(t: Totals, key: FeatureKey, prior: Prior): number | null {
+  const e = evidence(t, key);
+  if (!e) return null;
+  return ((e[0] + prior.strength * prior.mean) / (e[1] + prior.strength)) * scale(key);
 }

@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { cleanCsv } from "@/lib/ingest/clean";
 import { playerIdentity, toPlayerInputs } from "@/lib/ingest/to-inputs";
 import { SHRINK_MINUTES } from "@/lib/rating/compute";
+import { FEATURES, aggregate, evidence, type FeatureKey } from "@/lib/rating/features";
+import { empiricalStrength } from "@/lib/rating/priors";
 import { boxScore, model, spearman, splitHalf, topShareByPosition, type Candidate, type Scored } from "@/lib/rating/evaluate";
 
 const file = process.argv[2] ?? "data/match_events.csv";
@@ -11,11 +13,17 @@ const { rows, issues } = cleanCsv(readFileSync(file, "utf8"));
 const { inputs, names } = toPlayerInputs(rows);
 console.log(`${rows.length} appearances, ${inputs.length} players, ${issues.length} issues\n`);
 
+const fixed = { featurePriors: "fixed" } as const;
+const empirical = { featurePriors: "empirical" } as const;
 const candidates: Candidate[] = [
   { name: "A. Box score (fixed points /90)", run: boxScore },
-  { name: "B. Position z-score, no shrinkage", run: model({ positionAware: true, shrinkMinutes: null }) },
-  { name: `C. Position z-score + shrinkage (K=${SHRINK_MINUTES})`, run: model({ positionAware: true, shrinkMinutes: SHRINK_MINUTES }) },
-  { name: "D. Position-blind z-score + shrinkage", run: model({ positionAware: false, shrinkMinutes: SHRINK_MINUTES }) },
+  { name: "B. Position z-score, no shrinkage", run: model({ ...fixed, positionAware: true, shrinkMinutes: null }) },
+  // v1 as first shipped: K derived from B's split-half (≈285) and rounded to 270.
+  { name: "C. B + global minutes shrinkage (K=270, v1)", run: model({ ...fixed, positionAware: true, shrinkMinutes: 270 }) },
+  { name: `C'. C with the v2 K (K=${SHRINK_MINUTES})`, run: model({ ...fixed, positionAware: true, shrinkMinutes: SHRINK_MINUTES }) },
+  { name: "D. Position-blind + global shrinkage", run: model({ ...fixed, positionAware: false, shrinkMinutes: SHRINK_MINUTES }) },
+  { name: "E. Position z-score + per-stat empirical priors", run: model({ ...empirical, positionAware: true, shrinkMinutes: null }) },
+  { name: `F. E + global minutes shrinkage (K=${SHRINK_MINUTES})`, run: model({ ...empirical, positionAware: true, shrinkMinutes: SHRINK_MINUTES }) },
 ];
 
 const fmt = (x: number) => x.toFixed(2);
@@ -34,9 +42,9 @@ for (const c of candidates) {
 }
 
 // Sensitivity of the chosen model to K.
-const base = new Map(model({ positionAware: true, shrinkMinutes: SHRINK_MINUTES })(inputs).map((r) => [r.playerId, r.percentile]));
+const base = new Map(model({ ...empirical, positionAware: true, shrinkMinutes: SHRINK_MINUTES })(inputs).map((r) => [r.playerId, r.percentile]));
 for (const k of [180, 540]) {
-  const alt = model({ positionAware: true, shrinkMinutes: k })(inputs);
+  const alt = model({ ...empirical, positionAware: true, shrinkMinutes: k })(inputs);
   const diffs = alt.map((r) => Math.abs(r.percentile - base.get(r.playerId)!));
   console.log(`K=${k} vs K=${SHRINK_MINUTES}: median |Δpercentile| ${fmt(diffs.sort((a, b) => a - b)[diffs.length >> 1])}, max ${fmt(Math.max(...diffs))}`);
 }
@@ -49,14 +57,14 @@ for (const k of [180, 540]) {
   const eligible = inputs.filter((p) => p.appearances.filter((a) => a.minutes).length >= 2);
   const halfMinutes =
     eligible.reduce((s, p) => s + p.appearances.reduce((t, a) => t + (a.minutes ?? 0), 0), 0) / eligible.length / 2;
-  const { rho } = splitHalf(inputs, model({ positionAware: true, shrinkMinutes: null }));
+  const { rho } = splitHalf(inputs, model({ ...empirical, positionAware: true, shrinkMinutes: null }));
   const k = (halfMinutes * (1 - rho)) / rho;
   console.log(`\nimplied K: half = ${halfMinutes.toFixed(0)} min, rho = ${fmt(rho)} -> K ≈ ${k.toFixed(0)} min`);
 }
 
 // Team effect: does the rating mostly reflect which club you play for?
 {
-  const rated = model({ positionAware: true, shrinkMinutes: SHRINK_MINUTES })(inputs);
+  const rated = model({ ...empirical, positionAware: true, shrinkMinutes: SHRINK_MINUTES })(inputs);
   // Same id assignment as toPlayerInputs: first appearance order.
   const byPlayerTeam = new Map<number, string>();
   const ids = new Map<string, number>();
@@ -80,4 +88,15 @@ for (const k of [180, 540]) {
   rowsOut.sort((a, b) => a[0].localeCompare(b[0]) || b[1] - a[1]);
   for (const [k, m, g, n] of rowsOut) console.log(`  ${k.padEnd(24)} ${m.toFixed(0).padStart(3)}  GD ${g >= 0 ? "+" : ""}${g}  (n=${n})`);
   console.log(`  rank corr(team GD, team mean pct): ${fmt(spearman(rowsOut.map((r) => r[2]), rowsOut.map((r) => r[1])))}`);
+}
+
+// What the empirical priors learned, pooled over all players (one group).
+{
+  const all = inputs.map((p) => aggregate(p.appearances));
+  console.log("\nlearned prior strength (all players pooled):");
+  for (const f of Object.keys(FEATURES) as FeatureKey[]) {
+    const obs = all.map((t) => evidence(t, f)).filter((e): e is [number, number] => e !== null);
+    const unit = FEATURES[f].kind === "per90" ? "min" : "attempts";
+    console.log(`  ${f.padEnd(20)} ${empiricalStrength(obs, FEATURES[f].kind).toFixed(0).padStart(5)} ${unit}`);
+  }
 }

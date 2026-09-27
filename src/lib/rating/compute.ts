@@ -3,20 +3,27 @@ import {
   FEATURES,
   WEIGHTS,
   aggregate,
+  evidence,
+  rawFeature,
   smoothedFeature,
   type AppearanceInput,
   type FeatureKey,
+  type Prior,
   type Totals,
 } from "./features";
+import { empiricalStrength } from "./priors";
 
-export const MODEL_VERSION = "pz-shrink-v1";
+export const MODEL_VERSION = "pz-eb-shrink-v2";
 
 /**
- * Minutes at which a rating is trusted halfway (reliability = 0.5). Derived
- * from split-half agreement on the sample file (implied K ≈ 285, see
- * scripts/evaluate-ratings.ts) and rounded to three full matches.
+ * Minutes at which the composite score is trusted halfway (reliability 0.5).
+ * Derived from split-half agreement on the sample file with per-stat priors
+ * on (implied K ≈ 415, see scripts/evaluate-ratings.ts), rounded to five full
+ * matches. Percentiles barely move between 270 and 540.
  */
-export const SHRINK_MINUTES = 270;
+export const SHRINK_MINUTES = 450;
+/** Under this many minutes the UI labels a rating "low sample". */
+export const LOW_SAMPLE_MINUTES = 90;
 /** Below this many players, a position's peer group pools both age groups. */
 export const MIN_PEERS = 8;
 /** z-scores are clipped so one freak per-90 can't dominate a composite. */
@@ -33,6 +40,9 @@ export interface PlayerInput {
 export interface Component {
   feature: FeatureKey;
   label: string;
+  /** Unsmoothed per-90 or rate, as the raw numbers show it. */
+  raw: number;
+  /** After shrinking toward the peer average; this is what gets compared. */
   value: number;
   peerMean: number;
   z: number;
@@ -67,11 +77,20 @@ export interface PlayerRating {
 export interface ModelOptions {
   /** Compare within position (true) or against every outfield player (false). */
   positionAware: boolean;
-  /** Shrink toward the average by minutes; null disables. */
+  /** Shrink the whole score toward average by minutes; null disables. */
   shrinkMinutes: number | null;
+  /**
+   * How each feature is smoothed before comparing: "fixed" pseudo-counts on
+   * rates only, or "empirical" per-feature priors learned from the peers.
+   */
+  featurePriors: "fixed" | "empirical";
 }
 
-export const PRODUCTION_MODEL: ModelOptions = { positionAware: true, shrinkMinutes: SHRINK_MINUTES };
+export const PRODUCTION_MODEL: ModelOptions = {
+  positionAware: true,
+  shrinkMinutes: SHRINK_MINUTES,
+  featurePriors: "empirical",
+};
 
 interface Prepared {
   input: PlayerInput;
@@ -82,7 +101,7 @@ interface Prepared {
 
 interface GroupStats {
   count: number;
-  peerRate: Partial<Record<FeatureKey, number>>;
+  prior: Partial<Record<FeatureKey, Prior>>;
   mean: Partial<Record<FeatureKey, number>>;
   sd: Partial<Record<FeatureKey, number>>;
 }
@@ -104,23 +123,24 @@ function weightedMeanSd(values: { v: number; w: number }[]): { mean: number; sd:
   return { mean, sd: Math.sqrt(variance) };
 }
 
-function groupStats(members: Prepared[], features: FeatureKey[]): GroupStats {
-  const gs: GroupStats = { count: members.length, peerRate: {}, mean: {}, sd: {} };
+function groupStats(members: Prepared[], features: FeatureKey[], priors: ModelOptions["featurePriors"]): GroupStats {
+  const gs: GroupStats = { count: members.length, prior: {}, mean: {}, sd: {} };
   for (const f of features) {
-    if (FEATURES[f].kind === "rate") {
-      let s = 0, n = 0;
-      for (const m of members) {
-        const p = m.totals.rate[f];
-        if (p) { s += p[0]; n += p[1]; }
-      }
-      gs.peerRate[f] = n ? s / n : 0;
-    }
+    const def = FEATURES[f];
+    const obs = members.map((m) => evidence(m.totals, f)).filter((e): e is [number, number] => e !== null);
+    const exposure = obs.reduce((s, [, e]) => s + e, 0);
+    const rate = exposure ? obs.reduce((s, [x]) => s + x, 0) / exposure : 0;
+    const strength =
+      priors === "empirical" ? empiricalStrength(obs, def.kind) : def.kind === "rate" ? def.prior : 0;
+    gs.prior[f] = { mean: rate, strength };
     // Minutes-weighted, so a 4-minute cameo's extreme per-90 barely moves the
-    // baseline everyone else is measured against.
-    const vals = members
-      .map((m) => ({ v: smoothedFeature(m.totals, f, gs.peerRate[f] ?? 0), w: m.totals.minutes }))
-      .filter((x): x is { v: number; w: number } => x.v !== null);
-    const { mean, sd } = weightedMeanSd(vals);
+    // baseline everyone else is measured against. (Tried: dividing by the
+    // estimated talent spread instead. It lost: see README, model G.)
+    const { mean, sd } = weightedMeanSd(
+      members
+        .map((m) => ({ v: smoothedFeature(m.totals, f, gs.prior[f]!), w: m.totals.minutes }))
+        .filter((x): x is { v: number; w: number } => x.v !== null),
+    );
     gs.mean[f] = mean;
     gs.sd[f] = sd;
   }
@@ -133,12 +153,13 @@ function scoreTotals(t: Totals, weights: Weights, gs: GroupStats): { raw: number
   const components: Component[] = [];
   let totalAbs = 0;
   for (const [f, w] of Object.entries(weights) as [FeatureKey, number][]) {
-    const value = smoothedFeature(t, f, gs.peerRate[f] ?? 0);
+    const value = smoothedFeature(t, f, gs.prior[f]!);
     if (value === null) continue; // not measured: drop the weight rather than guess
     const sd = gs.sd[f] ?? 0;
     const mean = gs.mean[f] ?? 0;
     const z = sd > 1e-9 ? Math.max(-Z_CLIP, Math.min(Z_CLIP, (value - mean) / sd)) : 0;
-    components.push({ feature: f, label: FEATURES[f].label, value, peerMean: mean, z, weight: w, contribution: w * z });
+    const raw = rawFeature(t, f) ?? value;
+    components.push({ feature: f, label: FEATURES[f].label, raw, value, peerMean: mean, z, weight: w, contribution: w * z });
     totalAbs += Math.abs(w);
   }
   if (!totalAbs) return { raw: 0, components };
@@ -186,7 +207,7 @@ export function computeRatings(players: PlayerInput[], opts: ModelOptions = PROD
 
   const allFeatures = Object.keys(FEATURES) as FeatureKey[];
   const groups = new Map<string, GroupStats>();
-  for (const [g, members] of Map.groupBy(prepared, (p) => p.group)) groups.set(g, groupStats(members, allFeatures));
+  for (const [g, members] of Map.groupBy(prepared, (p) => p.group)) groups.set(g, groupStats(members, allFeatures, opts.featurePriors));
 
   // Position-blind mode uses one generic weight set, the average of the
   // outfield roles. That's the point of the comparison.

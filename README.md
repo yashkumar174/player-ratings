@@ -52,29 +52,38 @@ The layers: `src/lib/ingest` (pure CSV cleaning), `src/lib/rating` (pure rating 
 
 ## How the rating is computed
 
-1. **Per 90 and per role.** Counting stats become per-90 rates. Ratios (pass %, ground duel %, aerial %, possession lost per touch) are smoothed toward the group rate with pseudo-attempts, so "1 of 1 aerials" isn't 100%. Possession lost is per touch, not per 90, so a 130-touch midfielder isn't punished for being involved.
-2. **Compare to position peers.** Main position = most minutes. Each feature becomes a z-score against the minutes-weighted mean and SD of the same position in the same age group. Groups under 8 players (keepers: 6 per age group) pool both age groups. z is clipped to ±3.
-3. **Weight by role.** Each position has hand-set weights: goals dominate for ST, progression and pass % for CM, aerials, clearances and interceptions for CB, and so on (full table on `/method`). The weighted sum is the raw score.
-4. **Discount small samples.** `score = raw × minutes / (minutes + 270)`. This is a crude empirical-Bayes shrink: with no evidence you're average, and the more minutes you play the more of your raw score survives.
-5. **Percentile within age group.** Ranked 0–100, ties share.
+1. **Per 90 and per role.** Counting stats become per-90 rates; ratios are pass %, ground duel %, aerial %, and possession lost *per touch* (so a 130-touch midfielder isn't punished for being involved).
+2. **Shrink each stat by how noisy it is.** Before comparing, every stat is pulled toward the peer average: `(count + k·peer rate) / (minutes + k)`. The strength *k* is learned per stat from the data (method-of-moments empirical Bayes). The spread between players is split into what Poisson/binomial luck would produce and what's left over, which is real difference. Goals come out at k ≈ 195 minutes, assists 181, fouls committed 749 (almost all luck), crosses 45 and clearances 51 (very stable). A 58-minute winger's 3.10 goals/90 becomes an estimate of 0.79.
+3. **Compare to position peers.** Main position = most minutes. Each stat becomes a z-score against the minutes-weighted mean and SD of the same position in the same age group. Groups under 8 players (keepers: 6 per age group) pool both age groups. z is clipped to ±3.
+4. **Weight by role.** Hand-set weights per position: goals dominate for ST, progression and pass % for CM, aerials, clearances and interceptions for CB (full table on `/method`). The weighted sum is the raw score.
+5. **Discount the whole score for small samples.** `score = raw × minutes / (minutes + 450)`. Step 2 handles noise in each stat; this handles the composite, which is ten noisy numbers added together.
+6. **Percentile within age group.** Ranked 0–100, ties share.
 
-**Where 270 comes from.** I rated every player with 2+ matches twice, on alternate matches (~84 minutes per half), and compared the two rankings: ρ = 0.23. If a rating built on *m* minutes has reliability *m/(m+K)*, then 0.23 at 84 minutes implies K ≈ 285. 270 (three full matches) is the round number next to it. Percentiles barely move between K = 180 and K = 540 (median change about 1 point).
+**Where 450 comes from.** I rated every player with 2+ matches twice, on alternate matches (~84 minutes per half), and compared the two rankings: ρ = 0.17 with step 2 on. If a score built on *m* minutes has reliability *m/(m+K)*, then 0.17 at 84 minutes implies K ≈ 415. 450 is five full matches. Percentiles barely move between K = 180 and 540 (median change ≤ 1 point).
 
 ### What I tried
 
-Run with `npm run evaluate`. Numbers from the sample file:
+`npm run evaluate` runs all of these on the file. "Cameos in the tails" = players under 90 minutes landing in the top or bottom 10%, out of 53. Split-half ρ = agreement between ratings built on alternate matches.
 
-| Model | Idea | Top 5 | Sub-90-min players in top/bottom decile | Split-half ρ |
+| Model | Idea | Top 5 | Cameos in tails | Split-half ρ |
 |---|---|---|---|---|
-| A. Box score | Fixed points per action /90 for everyone | all five are 18–25 min cameos | 28 of 53 | 0.34 |
-| B. Position z-score | Role-specific peers and weights | mixed positions, all 18–66 min | 24 of 53 | 0.23 |
-| **C. B + shrinkage** | B, pulled toward average by minutes | four 245–270 min regulars, one 58 min | **6 of 53** | 0.18 |
-| D. Position-blind + shrinkage | One weight set for all outfielders | – | 1 of 53 | 0.34 |
+| A. Box score | Fixed points per action /90 for everyone | all five are 18–25 min cameos | 28 | 0.34 |
+| B. Position z-score | Role-specific peers and weights | mixed positions, all 18–66 min | 24 | 0.23 |
+| C. B + minutes shrink, K=270 (v1) | What I shipped first | four regulars, one 58 min | 6 | 0.18 |
+| C′. C with K=450 | Isolates the effect of K | five regulars | 3 | 0.18 |
+| D. Position-blind + shrink | One weight set for all outfielders | regulars | 1 | 0.35 |
+| E. B + per-stat priors only | Step 2 without step 5 | 58-min W and 58-min ST in top 3 | 11 | 0.17 |
+| **F. per-stat priors + minutes shrink (v2)** | **Chosen** | **five regulars, 200–270 min** | **1** | 0.16 |
+| G. F, but z against estimated talent spread | Theoretically cleaner scaling | regulars | 2 | 0.10 |
 
 - **A lost** because per-90 on 18 minutes is noise. One goal in a cameo is 5 goals/90, and it wins.
 - **B fixed the role problem, not the sample problem.**
-- **D looks best on stability and is the worst model.** It puts 20 of 46 centre-mids in the top 20% and 0 of 22 strikers. It is stable because *role* is stable: a CM touches the ball a lot every week. Split-half agreement rewards anything consistent, including the wrong thing, so I didn't pick on it alone.
-- **C** has the lowest split-half agreement of all. I think that's the honest result, not a defect of C: on 2–3 matches per player, most of the gap between two players is noise.
+- **C (v1)** still had Roque Moliner (58 min, 2 goals, 1 assist) at the 99th percentile. The fix was v2.
+- **D looks best on stability and is the worst model.** It puts 20 of 46 centre-mids in the top 20% and 0 of 22 strikers. It's stable because *role* is stable. Split-half agreement rewards anything consistent, including the wrong thing, so I never used it alone to choose a model.
+- **E alone doesn't fix cameos.** After shrinking, Roque Moliner's goal rate is still honestly the highest among U15 wingers.
+- **Being honest about F vs C′:** most of the improvement from v1 to v2 comes from the stronger whole-score shrink (C′ already gets cameos down to 3). The per-stat priors take it to 1 and, more importantly, shrink each stat for its own reason instead of pretending goals and passes are equally noisy.
+- **G lost.** Dividing by the estimated talent spread τ, instead of the spread of the shrunk estimates, is what the textbook says. But stats where talent differences are barely detectable get a tiny τ, so small deviations blow up: stability fell to 0.10 and strikers dropped to 2 of 22 in the top 20%.
+- F has the lowest split-half agreement of the sensible models. I think that's the honest result, not a defect: on 2–3 matches per player, most of the gap between two players is noise.
 
 ---
 
@@ -106,18 +115,19 @@ Run with `npm run evaluate`. Numbers from the sample file:
 
 This is the part I'd most want to talk through.
 
-1. **There isn't enough data to rate individuals.** Most players have 1–3 matches. Two halves of the same player's games agree at ρ ≈ 0.2. The percentile is an honest ranking of short samples; it's weak evidence about the player. The UI marks anyone under 90 minutes as "low sample", and even so Roque Moliner (58 minutes, 2 goals) sits at the 99th percentile.
-2. **Rare events aren't shrunk enough.** The minutes shrink is one K for every stat, but goals are much noisier than passes. 2 goals in 58 minutes is 3.1/90, the z-score hits the clip, and the shrunk score still ranks second. A per-stat Poisson–gamma prior (shrink goals harder than touches) would fix this properly.
-3. **It may be rating teams, not players.** Rank the 12 squads by average player percentile and by goal difference: ρ = 0.97. Real Madrid U15 (+12 GD) averages the 77th percentile, 7 of the U15 top 10. Getafe U15 (−10 GD) averages the 30th. Either better clubs have better players, which is plausible for academies, or a dominant team inflates everyone's per-90s. This file can't separate the two. There's also no opponent adjustment: stats from a 9–0 count the same as from a 1–1.
+1. **There isn't enough data to rate individuals.** Most players have 1–3 matches. Two halves of the same player's games agree at ρ ≈ 0.16. The percentile is an honest ranking of short samples and weak evidence about the player. Anyone under 90 minutes is marked "low sample".
+2. **Cameos are damped, not solved.** Roque Moliner (58 minutes, 2 goals, 1 assist) went from 99th (v1) to 93rd (v2). He's the one sub-90-minute player still in the top 10%. With 58 minutes of evidence, 93rd may be too confident.
+3. **It may be rating teams, not players.** Rank the 12 squads by average player percentile and by goal difference: ρ = 0.96. Real Madrid U15 (+12 GD) averages the 79th percentile and fills 8 of the U15 top 10; Getafe U15 (−10 GD) averages the 29th. Either better clubs have better players, which is plausible for academies, or a dominant team inflates everyone's per-90s. This file can't separate the two. There's also no opponent adjustment: stats from a 9–0 count the same as from a 1–1.
 4. **Keepers are barely rated.** With no saves or shots faced, 40% of a keeper's rating is his team's goals conceded while he was on. The top-rated U15 player is Real Madrid's keeper, largely because Real Madrid conceded 1 goal in 3 matches.
 5. **The weights are opinions.** Nothing in the file says what a good player is (no selection decisions, coach grades, or later outcomes), so nothing validates them.
-6. **Counts are volume, not quality.** Crosses and progressive passes have no completion or danger information; duels have no pitch location.
-7. **Mixed-position percentiles.** The list ranks a CB at the 80th next to a ST at the 80th as if the scales matched. Each is good *for his role*; comparing across roles is a stretch the list quietly makes.
+6. **The shrinkage is two-stage and approximate.** Per-stat priors assume Poisson/binomial noise. Real match-to-match variation is bigger (overdispersed), so the priors are probably too weak, and the whole-score K partly compensates. One hierarchical model would do both jobs properly.
+7. **Counts are volume, not quality.** Crosses and progressive passes have no completion or danger information; duels have no pitch location.
+8. **Mixed-position percentiles.** The list ranks a CB at the 80th next to a ST at the 80th as if the scales matched. Each is good *for his role*; comparing across roles is a stretch the list quietly makes.
 
 ## With a week
 
-- **Per-stat priors** (Poisson–gamma for counts, beta–binomial for rates) instead of one global K, and a **posterior interval** on each percentile ("between 55th and 90th") instead of a single number.
-- **Opponent and game-state adjustment**: a mixed model with team and opponent effects, so a player's rating is what's left after his team's strength. That's the direct fix for the ρ = 0.97 problem.
+- **One hierarchical model** (player effects within position, overdispersed counts) instead of two-stage shrinkage, with a **posterior interval** on each percentile ("between 55th and 90th") instead of a single number.
+- **Opponent and team adjustment**: team and opponent effects in the same model, so a player's rating is what's left after his team's strength. That's the direct fix for the ρ = 0.96 problem.
 - **Validate the weights** against anything external: coach ratings, selection, minutes next season. Or fit them rather than guess.
 - **A real player ID** (or fuzzy matching with human confirmation in the upload flow) instead of name + club.
 - **An upload preview**: show the cleaning report *before* committing, with accept/reject per issue. Plus upload auth, which there is none of now; anyone with the URL can upload.
@@ -132,7 +142,9 @@ _Draft. Yash: rewrite this in your own words before sending._
 
 I started with the data, not the app. I profiled the CSV in pandas before writing any code (duplicates, name variants, mixed dates, blanks, impossible combinations), because the brief said "as-is" and that usually means the cleaning is half the job. That profile became the cleaner's test cases.
 
-For the rating, I wanted something I could defend line by line rather than a clever formula. Per-90 and position peers were obvious; the real question was small samples. I built four candidates and a script to compare them, and that script changed my mind twice. First, it showed the box score's top five were all 18–25 minute cameos. Second, the metric I expected to pick the winner (split-half stability) favoured the position-blind model. That turned out to be because it measures role, not quality. I discarded both, used split-half agreement to *set* the shrinkage constant instead of to choose the model, and wrote down why.
+For the rating, I wanted something I could defend line by line rather than a clever formula. Per-90 and position peers were obvious; the real question was small samples. I built candidates and a script to compare them, and that script changed my mind several times. First, it showed the box score's top five were all 18–25 minute cameos. Second, the metric I expected to pick the winner (split-half stability) favoured the position-blind model. That turned out to be because it measures role, not quality. So I used split-half agreement to *set* the shrinkage constant, not to choose the model.
+
+v1 still had a 58-minute winger at the 99th percentile, so I added per-stat empirical-Bayes priors (goals shrink harder than passes). The script then showed most of the gain came from the stronger whole-score shrink the new split-half implied, not the priors themselves. I kept both and wrote that down. A theoretically cleaner variant (scaling by estimated talent spread) made things worse, and I reverted it.
 
 Where I got stuck: player identity with no ID (settled on name + age group + club and documented the failure mode), and whether to trust the dd/mm dates (checked them against the weekly fixture pattern). The team-strength correlation came late and I didn't have time to fix it, only to measure and report it.
 
