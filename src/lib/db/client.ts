@@ -27,7 +27,10 @@ async function connect(): Promise<Db> {
   const url = process.env.DATABASE_URL;
   if (url) {
     // prepare:false keeps us compatible with Supabase's transaction pooler.
-    const sql = postgres(url, { prepare: false, max: 5, idle_timeout: 20 });
+    // max:1 because on serverless every instance is its own pool: a burst of
+    // 60 requests once spun up enough instances x 5 connections to exhaust
+    // the pooler's client limit, and frozen instances hold theirs open.
+    const sql = postgres(url, { prepare: false, max: 1, idle_timeout: 20, connect_timeout: 10 });
     // Serverless cold starts run this concurrently, and parallel
     // "create ... if not exists" can collide in the catalog. A transaction
     // advisory lock makes instances take turns; it releases on commit.
