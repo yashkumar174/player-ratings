@@ -16,6 +16,16 @@ const nested = (): never => {
   throw new Error("Nested transactions are not supported");
 };
 
+/** Runs tasks one after another, in call order; a failure doesn't block the next. */
+function createQueue() {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(task: () => Promise<T>): Promise<T> => {
+    const run = tail.then(task, task);
+    tail = run.catch(() => undefined);
+    return run;
+  };
+}
+
 function pgQuery(s: postgres.Sql | postgres.TransactionSql): Pick<Db, "query"> {
   return {
     query: async <T>(text: string, params: unknown[] = []) =>
@@ -30,19 +40,7 @@ async function connect(): Promise<Db> {
     // max:1 because on serverless every instance is its own pool: a burst of
     // 60 requests once spun up enough instances x 5 connections to exhaust
     // the pooler's client limit, and frozen instances hold theirs open.
-    // max_pipeline:0 sends one query at a time. With a single connection,
-    // postgres.js otherwise pipelines a page's parallel queries, and through
-    // Supabase's transaction pooler that left the backend waiting on the
-    // client forever (pg_stat_activity: active, ClientRead) and pages hung.
-    // (max_pipeline is a runtime option missing from postgres.js's types.)
-    const options: postgres.Options<Record<string, never>> & { max_pipeline: number } = {
-      prepare: false,
-      max: 1,
-      max_pipeline: 0,
-      idle_timeout: 20,
-      connect_timeout: 10,
-    };
-    const sql = postgres(url, options);
+    const sql = postgres(url, { prepare: false, max: 1, idle_timeout: 20, connect_timeout: 10 });
     // Normal cold start: the schema exists, so touch nothing and take no lock.
     // First deploy only: parallel "create ... if not exists" can collide in the
     // catalog, so instances take turns on an advisory lock. The timeouts make
@@ -58,9 +56,20 @@ async function connect(): Promise<Db> {
         await tx.unsafe(SCHEMA_SQL);
       });
     }
+    // One statement in flight at a time. Given parallel queries on a single
+    // connection, postgres.js pipelines them, and through Supabase's
+    // transaction pooler that left the backend waiting on the client forever
+    // (pg_stat_activity: active / ClientRead) and pages hung. Vercel can also
+    // route concurrent requests to one instance, so this is a real queue.
+    // A transaction holds its turn until it commits; queries inside it use
+    // the transaction handle, not this queue. (postgres.js' own
+    // max_pipeline:0 would do this, but it breaks sql.begin in v3.4.)
+    const serial = createQueue();
+    const { query } = pgQuery(sql);
     return {
-      ...pgQuery(sql),
-      transaction: (fn) => sql.begin((tx) => fn({ ...pgQuery(tx), transaction: () => nested() })) as Promise<never>,
+      query: (text, params) => serial(() => query(text, params)),
+      transaction: (fn) =>
+        serial(() => sql.begin((tx) => fn({ ...pgQuery(tx), transaction: () => nested() })) as Promise<never>),
     };
   }
 
