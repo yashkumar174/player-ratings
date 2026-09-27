@@ -30,7 +30,19 @@ async function connect(): Promise<Db> {
     // max:1 because on serverless every instance is its own pool: a burst of
     // 60 requests once spun up enough instances x 5 connections to exhaust
     // the pooler's client limit, and frozen instances hold theirs open.
-    const sql = postgres(url, { prepare: false, max: 1, idle_timeout: 20, connect_timeout: 10 });
+    // max_pipeline:0 sends one query at a time. With a single connection,
+    // postgres.js otherwise pipelines a page's parallel queries, and through
+    // Supabase's transaction pooler that left the backend waiting on the
+    // client forever (pg_stat_activity: active, ClientRead) and pages hung.
+    // (max_pipeline is a runtime option missing from postgres.js's types.)
+    const options: postgres.Options<Record<string, never>> & { max_pipeline: number } = {
+      prepare: false,
+      max: 1,
+      max_pipeline: 0,
+      idle_timeout: 20,
+      connect_timeout: 10,
+    };
+    const sql = postgres(url, options);
     // Normal cold start: the schema exists, so touch nothing and take no lock.
     // First deploy only: parallel "create ... if not exists" can collide in the
     // catalog, so instances take turns on an advisory lock. The timeouts make
